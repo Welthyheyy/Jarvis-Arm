@@ -12,11 +12,14 @@ from dotenv import load_dotenv
 
 
 #Configurations
-GEMINI_API_KEY = ""
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 recording_duration = 5 # seconds
 sample_rate = 16000
 camera = True
 thinking_budget = 0 #0-1024 
+
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found — check your .env file")
 
 sample_objects= [
     "pen",
@@ -107,7 +110,7 @@ def transcribe_audio(audio, fs=sample_rate):
     return result['text'].strip()
 
 
-def generate_robot_command(transcription, image_b64=None):
+def get_command(transcription, image_b64=None):
     content = []
 
     if image_b64:
@@ -187,7 +190,7 @@ def main():
         frame_b64 = capture_frame()
  
         audio = record_audio()
-        transcript = transcribe(audio)
+        transcript = transcribe_audio(audio)
  
         if not transcript:
             print("Nothing detected, try again.")
