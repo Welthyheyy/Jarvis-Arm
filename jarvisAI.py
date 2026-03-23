@@ -9,6 +9,9 @@ import cv2
 import os
 import base64
 from dotenv import load_dotenv
+import openwakeword 
+from openwakeword.model import Model
+import pyttsx3
 
 
 #Configurations
@@ -17,6 +20,9 @@ recording_duration = 5 # seconds
 sample_rate = 16000
 camera = True
 thinking_budget = 0 #0-1024 
+wake_threshold = 0.5
+chunk_size = 1280 # 1280 samples at 16kHz = 80ms
+gemini_temp = 0.1 # low temp = more predictable, safer for robotics control
 
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found — check your .env file")
@@ -28,6 +34,22 @@ sample_objects= [
     "keyboard",
     "cup",
 ]
+
+oww_model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+print("Wake word model ready.")
+
+def listen_for_wake_word():
+    print("Say 'Hey Jarvis' to activate...")
+    with sd.InputStream(samplerate=sample_rate, channels=1, blocksize=chunk_size) as stream:
+        while True:
+            audio_chunk,_ = stream.read(chunk_size)
+            audio_flat = audio_chunk.flatten()
+            prediction = oww_model.predict(audio_flat)
+            score = prediction.get("hey_jarvis", 0.0)
+
+            if score>wake_threshold:
+                oww_model.reset()  # prevent multiple triggers
+                return
 
 
 #Gemini Prompt
@@ -63,7 +85,21 @@ Safety rule: if confidence is below 0.5, always use action "unknown".
 """
 
 whisper_model=whisper.load_model("base")
+tts = pyttsx3.init()
 
+voices = tts.getProperty('voices')
+for voice in voices:
+    if "samantha" in voice.name.lower():
+        tts.setProperty('voice', voice.id)
+        break
+
+tts.setProperty('rate', 150)  # Set speaking rate
+tts.setProperty('volume', 1.0)  # Set volume
+
+def speak(text):
+    print(f"Jarvis says: {text}")
+    tts.say(text)
+    tts.runAndWait()
 
 genai.configure(api_key = GEMINI_API_KEY)
 gemini = genai.GenerativeModel(
@@ -133,7 +169,7 @@ def get_command(transcription, image_b64=None):
     response = gemini.generate_content(
         content,
         generation_config=genai.GenerationConfig(
-            temperature=0.1,  # low = predictable, safe outputs
+            temperature=gemini_temp,  # low = predictable, safe outputs
         ),
     )
 
