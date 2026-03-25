@@ -9,9 +9,11 @@ import cv2
 import os
 import base64
 from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
 import openwakeword 
 from openwakeword.model import Model
 import pyttsx3
+import time
 
 
 #Configurations
@@ -20,7 +22,7 @@ recording_duration = 5 # seconds
 sample_rate = 16000
 camera = True
 thinking_budget = 0 #0-1024 
-wake_threshold = 0.5
+wake_threshold = 0.2
 chunk_size = 1280 # 1280 samples at 16kHz = 80ms
 gemini_temp = 0.1 # low temp = more predictable, safer for robotics control
 
@@ -38,8 +40,33 @@ sample_objects= [
 oww_model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
 print("Wake word model ready.")
 
+
 def listen_for_wake_word():
-    print("Say 'Hey Jarvis' to activate...")
+    print("Waiting for 'Hey Jarvis'...")
+
+    with sd.InputStream(
+        samplerate=sample_rate,
+        channels=1,
+        dtype="int16",
+        blocksize=chunk_size
+    ) as stream:
+        while True:
+            audio_chunk, _ = stream.read(chunk_size)
+            audio_flat = audio_chunk.flatten()
+
+            prediction = oww_model.predict(audio_flat)
+            score = prediction.get("hey_jarvis", 0)
+
+            # Print the score every frame so we can see what's happening
+            if score > 0.01:  # only print if there's any signal at all
+                print(f"Score: {score:.3f}")
+
+            if score > wake_threshold:
+                oww_model.reset()
+                return
+
+''''
+def listen_for_wake_word():
     with sd.InputStream(samplerate=sample_rate, channels=1, blocksize=chunk_size) as stream:
         while True:
             audio_chunk,_ = stream.read(chunk_size)
@@ -50,7 +77,7 @@ def listen_for_wake_word():
             if score>wake_threshold:
                 oww_model.reset()  # prevent multiple triggers
                 return
-
+'''
 
 #Gemini Prompt
 
@@ -204,6 +231,7 @@ def handle_command(command):
         print(f"  Notes      : {command.get('notes')}")
     print("─" * 44)
     print()
+    #ser.write((json.dumps(command) + '\n').encode())
 
 
 def main():
@@ -218,25 +246,30 @@ def main():
     print("  'open your hand'")
     print("  'stop everything'")
     print()
+    speak("Hello, I am Jarvis. I am ready to take your commands.")
  
     while True:
-        input("Press Enter to speak (Ctrl+C to quit)...")
- 
-        # capture scene BEFORE recording so image is current
-        frame_b64 = capture_frame()
- 
+        listen_for_wake_word()
+
+        speak("Yes? What can I do for you?")
+
         audio = record_audio()
         transcript = transcribe_audio(audio)
- 
+
         if not transcript:
-            print("Nothing detected, try again.")
+            speak("I didn't catch that, try again.")
             continue
- 
-        print(f'You said: "{transcript}"')
-        print("Sending to Gemini Robotics-ER...")
- 
-        command = get_command(transcript, frame_b64)
+
+        print(f"You said: \"{transcript}\"")
+        print("thinking...")
+
+        image = capture_frame()
+
+        command = get_command(transcript, image_b64=image)
         handle_command(command)
+        speak(command.get("reply", "Done"))
+
+        time.sleep(0.5)
  
  
 if __name__ == "__main__":
