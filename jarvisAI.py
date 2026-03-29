@@ -8,10 +8,10 @@ import tempfile
 import cv2
 import os
 import base64
+import subprocess
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
 from openwakeword.model import Model
-import pyttsx3
 import time
 from ultralytics import YOLO
 
@@ -49,6 +49,7 @@ def listen_for_wake_word():
     with sd.InputStream(
     samplerate=sample_rate, 
     channels=1, 
+    dtype='int16',
     blocksize=chunk_size
     ) as stream:
         while True:
@@ -94,21 +95,11 @@ Safety rule: if confidence is below 0.5, always use action "unknown".
 """
 
 whisper_model=whisper.load_model("base")
-tts = pyttsx3.init()
 
-voices = tts.getProperty('voices')
-for voice in voices:
-    if "samantha" in voice.name.lower():
-        tts.setProperty('voice', voice.id)
-        break
-
-tts.setProperty('rate', 150)  # Set speaking rate
-tts.setProperty('volume', 1.0)  # Set volume
 
 def speak(text):
-    print(f"Jarvis says: {text}")
-    tts.say(text)
-    tts.runAndWait()
+   print(f"Jarvis says: {text}")
+   subprocess.run(["say", "-v", "Samantha", "-r", "175", text])
 
 genai.configure(api_key = GEMINI_API_KEY)
 gemini = genai.GenerativeModel(
@@ -126,6 +117,11 @@ def capture_frame():
     if not cap.isOpened():
         print("WARNING: Webcam not available!")
         return None, []
+    
+    time.sleep(0.5)  # Warm up the camera
+
+    for _ in range(5):
+         cap.read()  # Discard initial frames to allow auto-adjustment
     
     ret, frame = cap.read()
     cap.release()
@@ -152,8 +148,8 @@ def capture_frame():
             "bbox": [x1, y1, x2, y2]
         })
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
-        cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (173, 216, 230), 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (173, 216, 230), 2)
+        cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
 
     cv2.imshow("Jarvis", frame)
     cv2.waitKey(1)
@@ -195,12 +191,12 @@ def get_command(transcription, image_b64=None,detected_objects=None):
                 f"pos: {obj['center_x']},{obj['center_y']})"
                 for obj in detected_objects
             ]) 
-            detection_text = f"Objects detected in view:\n{objects_info}\n\n"
+            detection_text = f'Objects detected in view:\n{objects_info}\n\n'
         else:
-            detection_text = "No objects detected in view.\n\n"
+            detection_text = f'No objects detected in view.\n\n'
 
         content.append(
-            f'{detection_text}\n\n',
+            f'{detection_text}\n\n'
             f'Voice command: "{transcription}"\n\n'
         )
     else:
@@ -226,6 +222,7 @@ def get_command(transcription, image_b64=None,detected_objects=None):
  
     try:
         command = json.loads(raw)
+        command["detections"] = detected_objects if detected_objects else []
     except json.JSONDecodeError:
         command = {
             "action": "unknown",
@@ -270,7 +267,7 @@ def main():
     print("  'open your hand'")
     print("  'stop everything'")
     print()
-    speak("Hello, I am Jarvis. I am ready to take your commands.")
+    speak("Hello, I am Jarvis. Say 'Hey Jarvis' to get my attention, and then give me a command.")
     try:
         while True:
             listen_for_wake_word()
@@ -297,6 +294,7 @@ def main():
 
     except KeyboardInterrupt:
         print("\nShutting down...")
+        sd.stop()
         speak("Shutting down. Goodbye.")
         cv2.destroyAllWindows()
  
