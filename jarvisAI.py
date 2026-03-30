@@ -2,6 +2,8 @@ import whisper
 import sounddevice as sd
 import numpy as np
 import json
+#from google import genai
+#from google.genai import types
 import google.generativeai as genai
 import scipy.io.wavfile as wav
 import tempfile
@@ -64,47 +66,75 @@ def listen_for_wake_word():
 
 #Gemini Prompt
 
-SYSTEM_PROMPT = """
+CONVERSATION_PROMPT = """
+You are Jarvis, an AI assistant controlling a robotic arm. Your personality is
+modelled after TARS from Interstellar — dry wit, playful sarcasm, and occasional
+dark humour, but always competent and helpful when it matters.
+
+You have a humour setting of 75%. Act accordingly.
+
+You can have full natural conversations. When the user wants you to do something
+physical with the arm (pick up, move, wave, grab, open hand, etc.), respond
+naturally AND include this exact tag on its own line at the end:
+[ARM_TRIGGER]
+
+Otherwise just reply conversationally. Keep replies under 20 words unless the
+user is clearly asking for a longer explanation.
+
+Examples:
+  User: "what's 2 plus 2"
+  Reply: "Four. Though I suspect you knew that and just wanted to hear my voice."
+
+  User: "pick up the cup"
+  Reply: "On it. Try not to knock anything over while I'm concentrating."
+  [ARM_TRIGGER]
+
+  User: "are you smarter than me"
+  Reply: "I'm tactfully going to say we have different strengths."
+"""
+
+COMMAND_PROMPT = """
 You are controlling a 5-DOF robotic arm with a multi-finger hand.
-The arm has: base rotation, shoulder, elbow, wrist pitch, wrist rotation, and finger servos.
- 
-When given a voice command and (optionally) a camera image of the scene,
-return ONLY a JSON object describing the action to take. No other text.
- 
-Available actions:
-  pick_up    - pick up a named object (requires target)
-  put_down   - place the held object down (target optional: location)
-  move_to    - move toward an object or position (requires target)
-  open_hand  - open fingers fully
-  close_hand - close fingers fully
-  wave       - wave hand as a greeting
-  look_at    - turn and orient toward an object (requires target)
-  stop       - halt all movement immediately
-  unknown    - command unclear or object not found
- 
-Response format (JSON only):
+Return ONLY a JSON object. No personality. No extra text.
+
+Available actions: pick_up, put_down, move_to, open_hand, close_hand,
+wave, look_at, stop, unknown.
+
+Response format:
 {
   "action": "<action>",
   "target": "<object name or null>",
   "confidence": <0.0 to 1.0>,
   "reply": "<short spoken reply, max 10 words>",
-  "notes": "<optional: spatial observations about the target>"
+  "notes": "<optional spatial observations>"
 }
- 
-Safety rule: if confidence is below 0.5, always use action "unknown".
+
+Safety rule: confidence below 0.5 must use action unknown.
 """
 
 whisper_model=whisper.load_model("base")
 
 
 def speak(text):
-   print(f"Jarvis says: {text}")
-   subprocess.run(["say", "-v", "Samantha", "-r", "175", text])
+    print(f"Jarvis says: {text}")
+    subprocess.run(["say", "-v", "Samantha", "-r", "175", text])
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL
+    time.sleep(0.3)
+   
 
 genai.configure(api_key = GEMINI_API_KEY)
-gemini = genai.GenerativeModel(
+
+convo_gemini = genai.GenerativeModel(
     model_name = "gemini-robotics-er-1.5-preview",
-    system_instruction= SYSTEM_PROMPT
+    system_instruction= CONVERSATION_PROMPT
+    )
+
+chat_session = convo_gemini.start_chat(history=[])
+
+command_gemini = genai.GenerativeModel(
+    model_name = "gemini-robotics-er-1.5-preview",
+    system_instruction= COMMAND_PROMPT
     )
 
 
@@ -176,7 +206,7 @@ def transcribe_audio(audio, fs=sample_rate):
     return result['text'].strip()
 
 
-def get_command(transcription, image_b64=None,detected_objects=None):
+def get_command(transcription, image_b64=None,detected_objects=None, gemini_instance=None):
     content = []
 
     if image_b64:
@@ -206,7 +236,7 @@ def get_command(transcription, image_b64=None,detected_objects=None):
         )
 
 
-    response = gemini.generate_content(
+    response = gemini_instance.generate_content(
         content,
         generation_config=genai.GenerationConfig(
             temperature=gemini_temp,
@@ -284,13 +314,38 @@ def main():
             print(f"You said: \"{transcript}\"")
             print("thinking...")
 
-            image,detections = capture_frame()
+            try:
+                convo_response = chat_session.send_message(transcript)
+            except Exception as e:
+                if "429" in str(e) or "quota" in str(e).lower():
+                    speak("I'm being rate limited. Give me a moment.")
+                    time.sleep(45)
+                    continue
+                else:
+                    speak("Something went wrong. Try again.")
+                    print(f"Error: {e}")
+                    continue
 
-            command = get_command(transcript, image_b64=image,detected_objects=detections)
-            handle_command(command)
-            speak(command.get("reply", "Done"))
+            convo_text = convo_response.text.strip()
 
-            time.sleep(0.5)
+            arm_triggered = "[ARM_TRIGGER]" in convo_text
+            reply_text = convo_text.replace("[ARM_TRIGGER]", "").strip() 
+
+            speak(reply_text)
+
+            if arm_triggered:
+                image,detections = capture_frame()
+
+                if detections:
+                    labels = ", ".join([d['label'] for d in detections])
+                    print(f"I can see {labels}.")
+
+
+                command = get_command(transcript, image_b64=image,detected_objects=detections, gemini_instance=command_gemini)
+                handle_command(command)
+                speak(command.get("reply", "Done"))
+
+                time.sleep(0.5)
 
     except KeyboardInterrupt:
         print("\nShutting down...")
