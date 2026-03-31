@@ -2,25 +2,33 @@ import whisper
 import sounddevice as sd
 import numpy as np
 import json
-#from google import genai
-#from google.genai import types
-import google.generativeai as genai
 import scipy.io.wavfile as wav
 import tempfile
 import cv2
 import os
 import base64
-import subprocess
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
 from openwakeword.model import Model
 import time
 from ultralytics import YOLO
+import subprocess
+
+#elevenlabs api = https://elevenlabs.io/app/developers/analytics/usage
+from elevenlabs.client import ElevenLabs
+from elevenlabs.play import play
+
+#gemini api = https://aistudio.google.com/api-keys
+#from google import genai
+#from google.genai import types
+import google.generativeai as genai
+
 
 #source venv/bin/activate
 
 #Configurations
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ELEVENLAB_API_KEY = os.getenv("ELEVENLAB_API_KEY")
 recording_duration = 5 # seconds
 sample_rate = 16000
 camera = True
@@ -114,14 +122,24 @@ Safety rule: confidence below 0.5 must use action unknown.
 
 whisper_model=whisper.load_model("base")
 
+AI_voice = ElevenLabs(api_key=ELEVENLAB_API_KEY)
 
 def speak(text):
     print(f"Jarvis says: {text}")
-    subprocess.run(["say", "-v", "Samantha", "-r", "175", text])
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL
-    time.sleep(0.3)
-   
+    try:
+        audio = AI_voice.text_to_speech.convert(
+            text=text,
+            voice_id="pNInz6obpgDQGcFmaJgB",
+            model_id="eleven_flash_v2_5"
+        )
+
+        play(audio)
+        time.sleep(0.3)
+    except Exception as e:
+        print(f"ElevenLabs error: {e}")
+        #Fall back to Mac say if ElevenLabs fails
+        subprocess.run(["say", "-v", "Samantha", "-r", "175", text])
+    
 
 genai.configure(api_key = GEMINI_API_KEY)
 
