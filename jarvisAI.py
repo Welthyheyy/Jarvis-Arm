@@ -22,6 +22,7 @@ from elevenlabs.play import play
 #from google import genai
 #from google.genai import types
 import google.generativeai as genai
+import serial
 
 
 #source venv/bin/activate
@@ -33,11 +34,30 @@ recording_duration = 5 # seconds
 sample_rate = 16000
 camera = True
 thinking_budget = 0 #0-1024  
-wake_threshold = 0.2
+wake_threshold = 0.3
 chunk_size = 1280 # 1280 samples at 16kHz = 80ms
 gemini_temp = 0.1 # low temp = more predictable, safer for robotics control
 yolo_model = YOLO("yolov8n.pt")  # Load pre-trained YOLOv8 model for object detection
 yolo_confidence = 0.5  # Confidence threshold for YOLO detections
+
+
+try:
+    hand_ser = serial.Serial('/dev/cu.usbmodem11301', 9600, timeout=1)
+    time.sleep(2)
+    print("Hand Arduino connected.")
+except Exception as e:
+    print(f"Hand Arduino not connected: {e}")
+    hand_ser = None
+
+try:
+    arm_ser = serial.Serial('/dev/cu.usbmodem11302', 9600, timeout=1)
+    time.sleep(2)
+    print("Arm Arduino connected.")
+except Exception as e:
+    print(f"Arm Arduino not connected: {e}")
+    arm_ser = None
+
+mode = "autonomous"  # or "teleop"
 
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found — check your .env file")
@@ -85,6 +105,12 @@ You can have full natural conversations. When the user wants you to do something
 physical with the arm (pick up, move, wave, grab, open hand, etc.), respond
 naturally AND include this exact tag on its own line at the end:
 [ARM_TRIGGER]
+
+If the user says something like "copy my movements", "mirror me", "follow my hand",
+include this tag on its own line: [TELEOP_MODE]
+
+If the user says "stop copying", "take over", "do it yourself",
+include this tag: [AUTO_MODE]
 
 Otherwise just reply conversationally. Keep replies under 20 words unless the
 user is clearly asking for a longer explanation.
@@ -135,6 +161,7 @@ def speak(text):
 
         play(audio)
         time.sleep(0.3)
+
     except Exception as e:
         print(f"ElevenLabs error: {e}")
         #Fall back to Mac say if ElevenLabs fails
@@ -169,7 +196,7 @@ def capture_frame():
     time.sleep(0.5)  # Warm up the camera
 
     for _ in range(5):
-         cap.read()  # Discard initial frames to allow auto-adjustment
+        cap.read()  # Discard initial frames to allow auto-adjustment
     
     ret, frame = cap.read()
     cap.release()
@@ -283,12 +310,13 @@ def get_command(transcription, image_b64=None,detected_objects=None, gemini_inst
  
     return command
 
-def handle_command(command):
+def handle_command(command,arm_ser=None):
+    action = command.get("action")
     detections = command.get("detections", [])
 
     print()
-    print("─" * 44)
-    print(f"  Action     : {command.get('action')}")
+    print("-" * 44)
+    print(f"  Action     : {action}")
     print(f"  Target     : {command.get('target')}")
     print(f"  Confidence : {command.get('confidence')}")
     print(f"  Reply      : {command.get('reply')}")
@@ -298,12 +326,13 @@ def handle_command(command):
         print(f"  YOLO saw   : {', '.join([d['label'] for d in detections])}")
     else:  
         print(f"  YOLO saw   : nothing")
-    print("─" * 44)
+    print("-" * 44)
     print()
-    #ser.write((json.dumps(command) + '\n').encode())
 
 
 def main():
+    global mode
+
     print("=== Robot Voice Controller — Gemini Robotics-ER 1.5 ===")
     print()
     print("The AI sees a live webcam frame with each command.")
@@ -332,6 +361,8 @@ def main():
             print(f"You said: \"{transcript}\"")
             print("thinking...")
 
+          
+
             try:
                 convo_response = chat_session.send_message(transcript)
             except Exception as e:
@@ -345,6 +376,13 @@ def main():
                     continue
 
             convo_text = convo_response.text.strip()
+
+            if "[TELEOP_MODE]" in convo_text:
+                mode = "teleop"
+                speak("Copying your movements")
+            if "[AUTO_MODE]" in convo_text:
+                mode = "autonomous"
+                speak("I'll take it from here")
 
             arm_triggered = "[ARM_TRIGGER]" in convo_text
             reply_text = convo_text.replace("[ARM_TRIGGER]", "").strip() 
