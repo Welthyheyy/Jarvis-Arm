@@ -1,4 +1,3 @@
-import whisper
 import sounddevice as sd
 import numpy as np
 import json
@@ -13,6 +12,8 @@ from openwakeword.model import Model
 import time
 from ultralytics import YOLO
 import subprocess
+from kinematics import px_to_table_landscape, calculate_arm_angles, load_calibration
+from faster_whisper import WhisperModel
 
 #elevenlabs api = https://elevenlabs.io/app/developers/analytics/usage
 from elevenlabs.client import ElevenLabs
@@ -146,7 +147,7 @@ Response format:
 Safety rule: confidence below 0.5 must use action unknown.
 """
 
-whisper_model=whisper.load_model("base")
+whisper_model=WhisperModel("base", device="cpu",compute_type="int8")  # Load Whisper model for speech recognition
 
 AI_voice = ElevenLabs(api_key=ELEVENLAB_API_KEY)
 
@@ -160,7 +161,7 @@ def speak(text):
         )
 
         play(audio)
-        time.sleep(0.3)
+        time.sleep(0.1)
 
     except Exception as e:
         print(f"ElevenLabs error: {e}")
@@ -246,9 +247,10 @@ def transcribe_audio(audio, fs=sample_rate):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
         wav.write(tmp_path, fs, (audio * 32767).astype(np.int16))
-    result = whisper_model.transcribe(tmp_path)
+
+    segments,_ = whisper_model.transcribe(tmp_path,beam_size=1)
     os.remove(tmp_path)
-    return result['text'].strip()
+    return " ".join([s.text for s in segments]).strip()
 
 
 def get_command(transcription, image_b64=None,detected_objects=None, gemini_instance=None):
@@ -310,9 +312,10 @@ def get_command(transcription, image_b64=None,detected_objects=None, gemini_inst
  
     return command
 
-def handle_command(command,arm_ser=None):
+def handle_command(command,ser=None):
     action = command.get("action")
     detections = command.get("detections", [])
+    target = command.get("target")
 
     print()
     print("-" * 44)
@@ -328,6 +331,78 @@ def handle_command(command,arm_ser=None):
         print(f"  YOLO saw   : nothing")
     print("-" * 44)
     print()
+
+    if not ser or not ser.is_open:
+        print("No serial connection for arm control. Skipping physical action.")
+        return
+    
+    if action == "pick up" and target:
+        match = None
+        for obj in detections:
+            if obj['label'] == target:
+                match = obj
+                break
+
+            if match:
+                cx = match['center_x']
+                cy = match['center_y']
+
+                x, y,z = px_to_table_landscape(cx, cy)
+
+                angles = calculate_arm_angles(x, y,z)
+                
+                ser.write(f"B:{int(angles['base_deg'])}\n".encode())
+                time.sleep(0.1)
+                ser.write(f"S:{int(angles['shoulder_deg'])}\n".encode())
+                time.sleep(0.1)
+                ser.write(f"E:{int(angles['elbow_deg'])}\n".encode())
+                time.sleep(0.1)
+
+                time.sleep(0.8)  # wait for arm to reach position
+                ser.write(b"I:0\n")   # close index
+                ser.write(b"M:0\n")   # close middle
+                ser.write(b"T:0\n")   # close thumb
+                ser.write(b"R:0\n")   # close ring
+                ser.write(b"P:0\n")   # close pinky
+
+            else:
+                speak(f"I can see the scene but could not find the {target}.")
+
+    elif action == "open hand":
+        ser.write(b"I:180\n")   # open index
+        ser.write(b"M:180\n")   # open middle
+        ser.write(b"T:180\n")   # open thumb
+        ser.write(b"R:180\n")   # open ring
+        ser.write(b"P:180\n")   # open pinky
+
+    elif action == "put down":
+        ser.write(b"I:180\n")   # open index
+        ser.write(b"M:180\n")   # open middle
+        ser.write(b"T:180\n")   # open thumb
+        ser.write(b"R:180\n")   # open ring
+        ser.write(b"P:180\n")   # open pinky
+        time.sleep(0.5)
+        ser.write(b"B:90\n")   # move base to neutral
+        ser.write(b"S:90\n")   # move shoulder to neutral
+        ser.write(b"E:90\n")   # move elbow to neutral
+
+    elif action == "close hand":
+        ser.write(b"I:0\n")   # close index
+        ser.write(b"M:0\n")   # close middle
+        ser.write(b"T:0\n")   # close thumb
+        ser.write(b"R:0\n")   # close ring
+        ser.write(b"P:0\n")   # close pinky
+    
+    elif action == "wave":
+        for _ in range(3):
+            ser.write(b"B:60\n")  # wave left
+            time.sleep(0.5)
+            ser.write(b"B:120\n") # wave right
+            time.sleep(0.5)
+        ser.write(b"B:90\n")   # return to center
+    
+    elif action == "stop":
+        pass
 
 
 def main():
@@ -345,6 +420,15 @@ def main():
     print("  'stop everything'")
     print()
     speak("Hello, I am Jarvis. Say 'Hey Jarvis' to get my attention, and then give me a command.")
+
+    try:
+        ser = serial.Serial('/dev/tty.usbmodem11301', 9600, timeout=1)
+        time.sleep(2)  # Arduino resets on serial connect, wait for it
+        print("Arduino connected.")
+    except Exception as e:
+        print(f"Arduino not connected: {e}")
+        ser = None
+
     try:
         while True:
             listen_for_wake_word()
@@ -361,7 +445,6 @@ def main():
             print(f"You said: \"{transcript}\"")
             print("thinking...")
 
-          
 
             try:
                 convo_response = chat_session.send_message(transcript)
@@ -398,7 +481,7 @@ def main():
 
 
                 command = get_command(transcript, image_b64=image,detected_objects=detections, gemini_instance=command_gemini)
-                handle_command(command)
+                handle_command(command,ser=ser)
                 speak(command.get("reply", "Done"))
 
                 time.sleep(0.5)
