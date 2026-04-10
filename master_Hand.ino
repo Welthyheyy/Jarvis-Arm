@@ -19,8 +19,8 @@ Servo pinkyServ;
 int indexPin = 9;
 int middlePin = 10;
 int thumbPin = 6;
-int ringPin = 11;
-int pinkyPin = 12;
+int ringPin = A0;
+int pinkyPin = A1;
 
 int targetServoAngle = 90;
 long targetStepperPos = 0;

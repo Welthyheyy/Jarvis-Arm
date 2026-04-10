@@ -339,43 +339,43 @@ def handle_command(command,ser=None):
     if action == "pick up" and target:
         match = None
         for obj in detections:
-            if obj['label'] == target:
+            if obj['label'].lower() == target.lower():
                 match = obj
                 break
 
-            if match:
-                cx = match['center_x']
-                cy = match['center_y']
+        if match:
+            cx = match['center_x']
+            cy = match['center_y']
 
-                x, y,z = px_to_table_landscape(cx, cy)
+            x, y,z = px_to_table_landscape(cx, cy)
 
-                angles = calculate_arm_angles(x, y,z)
-                
-                ser.write(f"B:{int(angles['base_deg'])}\n".encode())
-                time.sleep(0.1)
-                ser.write(f"S:{int(angles['shoulder_deg'])}\n".encode())
-                time.sleep(0.1)
-                ser.write(f"E:{int(angles['elbow_deg'])}\n".encode())
-                time.sleep(0.1)
+            angles = calculate_arm_angles(x, y,z)
+            
+            ser.write(f"B:{int(angles['base_deg'])}\n".encode())
+            time.sleep(0.1)
+            ser.write(f"S:{int(angles['shoulder_deg'])}\n".encode())
+            time.sleep(0.1)
+            ser.write(f"E:{int(angles['elbow_deg'])}\n".encode())
+            time.sleep(0.1)
 
-                time.sleep(0.8)  # wait for arm to reach position
-                ser.write(b"I:0\n")   # close index
-                ser.write(b"M:0\n")   # close middle
-                ser.write(b"T:0\n")   # close thumb
-                ser.write(b"R:0\n")   # close ring
-                ser.write(b"P:0\n")   # close pinky
+            time.sleep(0.8)  # wait for arm to reach position
+            ser.write(b"I:0\n")   # close index
+            ser.write(b"M:0\n")   # close middle
+            ser.write(b"T:0\n")   # close thumb
+            ser.write(b"R:0\n")   # close ring
+            ser.write(b"P:0\n")   # close pinky
 
-            else:
-                speak(f"I can see the scene but could not find the {target}.")
+        else:
+            speak(f"I can see the scene but could not find the {target}.")
 
-    elif action == "open hand":
+    elif action == "open_hand":
         ser.write(b"I:180\n")   # open index
         ser.write(b"M:180\n")   # open middle
         ser.write(b"T:180\n")   # open thumb
         ser.write(b"R:180\n")   # open ring
         ser.write(b"P:180\n")   # open pinky
 
-    elif action == "put down":
+    elif action == "put_down":
         ser.write(b"I:180\n")   # open index
         ser.write(b"M:180\n")   # open middle
         ser.write(b"T:180\n")   # open thumb
@@ -386,7 +386,7 @@ def handle_command(command,ser=None):
         ser.write(b"S:90\n")   # move shoulder to neutral
         ser.write(b"E:90\n")   # move elbow to neutral
 
-    elif action == "close hand":
+    elif action == "close_hand":
         ser.write(b"I:0\n")   # close index
         ser.write(b"M:0\n")   # close middle
         ser.write(b"T:0\n")   # close thumb
@@ -420,14 +420,6 @@ def main():
     print("  'stop everything'")
     print()
     speak("Hello, I am Jarvis. Say 'Hey Jarvis' to get my attention, and then give me a command.")
-
-    try:
-        ser = serial.Serial('/dev/tty.usbmodem11301', 9600, timeout=1)
-        time.sleep(2)  # Arduino resets on serial connect, wait for it
-        print("Arduino connected.")
-    except Exception as e:
-        print(f"Arduino not connected: {e}")
-        ser = None
 
     try:
         while True:
@@ -468,7 +460,10 @@ def main():
                 speak("I'll take it from here")
 
             arm_triggered = "[ARM_TRIGGER]" in convo_text
-            reply_text = convo_text.replace("[ARM_TRIGGER]", "").strip() 
+            reply_text = (convo_text
+            .replace("[ARM_TRIGGER]", "")
+            .replace("[TELEOP_MODE]", "")
+            .replace("[AUTO_MODE]", "").strip()) 
 
             speak(reply_text)
 
@@ -481,7 +476,7 @@ def main():
 
 
                 command = get_command(transcript, image_b64=image,detected_objects=detections, gemini_instance=command_gemini)
-                handle_command(command,ser=ser)
+                handle_command(command,ser=hand_ser)
                 speak(command.get("reply", "Done"))
 
                 time.sleep(0.5)

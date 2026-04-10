@@ -32,6 +32,7 @@ const int elbowMax = 160;
 void setup() {
   // put your setup code here, to run once:
 
+  masterSerial.begin(9600);
   Serial.begin(9600);
   baseServo.attach(basePin);
   shoulderServo.attach(shoulderPin);
@@ -48,7 +49,7 @@ void loop() {
 
 
   if(masterSerial.available()){
-    String cmd = Serial.readStringUntil('\n');
+    String cmd = masterSerial.readStringUntil('\n');
 
     cmd.trim();
 
