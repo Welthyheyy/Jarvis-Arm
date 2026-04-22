@@ -11,9 +11,10 @@ load_dotenv()  # Load environment variables from .env file
 from openwakeword.model import Model
 import time
 from ultralytics import YOLO
-import subprocess
 from kinematics import px_to_table_landscape, calculate_arm_angles, load_calibration
 from faster_whisper import WhisperModel
+import subprocess
+import webrtcvad
 
 #elevenlabs api = https://elevenlabs.io/app/developers/analytics/usage
 from elevenlabs.client import ElevenLabs
@@ -25,21 +26,28 @@ from elevenlabs.play import play
 import google.generativeai as genai
 import serial
 
+#groq api = https://console.groq.com/keys
+from groq import Groq
 
 #source venv/bin/activate
 
 #Configurations
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ELEVENLAB_API_KEY = os.getenv("ELEVENLAB_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 recording_duration = 5 # seconds
 sample_rate = 16000
 camera = True
-thinking_budget = 0 #0-1024  
 wake_threshold = 0.3
 chunk_size = 1280 # 1280 samples at 16kHz = 80ms
 gemini_temp = 0.1 # low temp = more predictable, safer for robotics control
 yolo_model = YOLO("yolov8n.pt")  # Load pre-trained YOLOv8 model for object detection
 yolo_confidence = 0.5  # Confidence threshold for YOLO detections
+mode = "autonomous"  # or "teleop"
+conversationTemp = 0.75 #higher for more personality
+thinking_budget = 150 #max tokens for Groq response
+CONVO_TIMEOUT = 12 # seconds to respond before sleeping
+humour = 75 # percentage of humour in Jarvis's personality
 
 
 try:
@@ -58,18 +66,6 @@ except Exception as e:
     print(f"Arm Arduino not connected: {e}")
     arm_ser = None
 
-mode = "autonomous"  # or "teleop"
-
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not found — check your .env file")
-
-sample_objects= [
-    "pen",
-    "phone",
-    "mouse",
-    "keyboard",
-    "cup",
-]
 
 oww_model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
 print("Wake word model ready.")
@@ -93,28 +89,25 @@ def listen_for_wake_word():
                 oww_model.reset()  # prevent multiple triggers
                 return
 
-#Gemini Prompt
-
+#Groq Prompt
 CONVERSATION_PROMPT = """
-You are Jarvis, an AI assistant controlling a robotic arm. Your personality is
+You are hood Jarvis, an AI assistant with a toronto mans slang, controlling a robotic arm. Your personality is
 modelled after TARS from Interstellar — dry wit, playful sarcasm, and occasional
 dark humour, but always competent and helpful when it matters.
 
-You have a humour setting of 75%. Act accordingly.
+You have a humour setting of {humour}percent. Act accordingly.
 
-You can have full natural conversations. When the user wants you to do something
-physical with the arm (pick up, move, wave, grab, open hand, etc.), respond
-naturally AND include this exact tag on its own line at the end:
-[ARM_TRIGGER]
+You are able to have a continuous conversation — reply back with follow-up questions occasionally when you see fit.
+Remember context from earlier in the conversation and build on it naturally.
+Ask follow-up questions occasionally. React to what was just said rather than
+giving generic responses.
 
-If the user says something like "copy my movements", "mirror me", "follow my hand",
-include this tag on its own line: [TELEOP_MODE]
+Reply length should match the question — short questions get short answers,
+detailed questions get detailed answers. Never pad with filler. Keep it concise.
 
-If the user says "stop copying", "take over", "do it yourself",
-include this tag: [AUTO_MODE]
-
-Otherwise just reply conversationally. Keep replies under 20 words unless the
-user is clearly asking for a longer explanation.
+When the user wants something physical with the arm, include [ARM_TRIGGER] on
+its own line at the end. For teleop mode include [TELEOP_MODE]. To return to
+autonomous include [AUTO_MODE].
 
 Examples:
   User: "what's 2 plus 2"
@@ -150,6 +143,30 @@ Safety rule: confidence below 0.5 must use action unknown.
 whisper_model=WhisperModel("base", device="cpu",compute_type="int8")  # Load Whisper model for speech recognition
 
 AI_voice = ElevenLabs(api_key=ELEVENLAB_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+conversation_history=[
+    {"role": "system", "content": CONVERSATION_PROMPT}
+]
+
+def convo_message(transcript):
+    conversation_history.append({"role": "user", "content": transcript})
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=conversation_history,
+        temperature=conversationTemp,
+        max_tokens=thinking_budget
+    )
+
+    reply = response.choices[0].message.content
+    conversation_history.append({
+        "role": "assistant",
+        "content": reply
+    })
+
+    return reply
+
 
 def speak(text):
     print(f"Jarvis says: {text}")
@@ -171,12 +188,6 @@ def speak(text):
 
 genai.configure(api_key = GEMINI_API_KEY)
 
-convo_gemini = genai.GenerativeModel(
-    model_name = "gemini-robotics-er-1.5-preview",
-    system_instruction= CONVERSATION_PROMPT
-    )
-
-chat_session = convo_gemini.start_chat(history=[])
 
 command_gemini = genai.GenerativeModel(
     model_name = "gemini-robotics-er-1.5-preview",
@@ -236,12 +247,42 @@ def capture_frame():
 
     
     
-def record_audio(seconds=recording_duration, fs=sample_rate):
-    print("Recording audio...")
-    audio = sd.rec(int(seconds * fs), samplerate=fs, channels=1, dtype='float32')
-    sd.wait()
-    print("Done listening")
-    return audio.flatten()
+def record_audio(fs=sample_rate,silence_duration=1.2, max_duration=10):
+    vad = webrtcvad.Vad(2)  # Aggressiveness mode (0-3)
+
+    frame_ms = 30  # Frame size in ms
+    frame_size = int(fs * frame_ms / 1000)
+    
+    silence_frames_needed = int(silence_duration * 1000 / frame_ms)
+    max_frames = int(max_duration * 1000 / frame_ms)
+
+    print("Listening... (speak now)")
+
+    frames = []
+    silence_counter = 0
+    speech_started = False
+
+    with sd.InputStream(samplerate=fs, channels=1, dtype='int16', blocksize=frame_size) as stream:
+
+        for _ in range(max_frames):
+            audio_chunk, _ = stream.read(frame_size)
+            audio_flat = audio_chunk.flatten().tobytes()
+            frames.append(audio_chunk.flatten())
+
+            is_speech = vad.is_speech(audio_flat, fs)
+
+            if is_speech:
+                speech_started = True
+                silence_counter = 0
+            elif speech_started:
+                silence_counter += 1
+                if silence_counter >= silence_frames_needed:
+                    print("Done listening")
+                    break
+    audio = np.concatenate(frames).astype(np.float32) / 32767.0
+    return audio
+
+    
 
 def transcribe_audio(audio, fs=sample_rate):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -425,61 +466,71 @@ def main():
         while True:
             listen_for_wake_word()
 
-            speak("Yes? What can I do for you?")
+            speak("Yeah?")
 
-            audio = record_audio()
-            transcript = transcribe_audio(audio)
-
-            if not transcript:
-                speak("I didn't catch that, try again.")
-                continue
-
-            print(f"You said: \"{transcript}\"")
-            print("thinking...")
+            last_interaction = time.time()
+            in_conversation = True
 
 
-            try:
-                convo_response = chat_session.send_message(transcript)
-            except Exception as e:
-                if "429" in str(e) or "quota" in str(e).lower():
-                    speak("I'm being rate limited. Give me a moment.")
-                    time.sleep(45)
+            while in_conversation:
+                time_since_last = time.time() - last_interaction
+
+                if time_since_last > CONVO_TIMEOUT:
+                    speak("Going to sleep. Wake me up when you need me.")
+                    in_conversation = False
+                    break
+
+                audio = record_audio()
+                transcript = transcribe_audio(audio)
+
+                if not transcript or len(transcript.strip())<2:
                     continue
-                else:
-                    speak("Something went wrong. Try again.")
+
+                print(f"You said: \"{transcript}\"")
+                print("thinking...")
+                last_interaction = time.time()
+
+                try:
+                    convo_text = convo_message(transcript)
+                except Exception as e:
+                    if "429" in str(e):
+                        speak("Give me a moment.")
+                        time.sleep(10)
+                        continue
+                    speak("Something went wrong.")
                     print(f"Error: {e}")
                     continue
 
-            convo_text = convo_response.text.strip()
+                if "[TELEOP_MODE]" in convo_text:
+                    mode = "teleop"
+                    print("Teleoperation mode enabled")
+                elif "[AUTO_MODE]" in convo_text:
+                    mode = "autonomous"
+                    print("Autonomous mode enabled")
 
-            if "[TELEOP_MODE]" in convo_text:
-                mode = "teleop"
-                speak("Copying your movements")
-            if "[AUTO_MODE]" in convo_text:
-                mode = "autonomous"
-                speak("I'll take it from here")
-
-            arm_triggered = "[ARM_TRIGGER]" in convo_text
-            reply_text = (convo_text
-            .replace("[ARM_TRIGGER]", "")
-            .replace("[TELEOP_MODE]", "")
-            .replace("[AUTO_MODE]", "").strip()) 
-
-            speak(reply_text)
-
-            if arm_triggered:
-                image,detections = capture_frame()
-
-                if detections:
-                    labels = ", ".join([d['label'] for d in detections])
-                    print(f"I can see {labels}.")
+                reply_text = (convo_text
+                    .replace("[ARM_TRIGGER]", "")
+                    .replace("[TELEOP_MODE]", "")
+                    .replace("[AUTO_MODE]", "").strip()) 
 
 
-                command = get_command(transcript, image_b64=image,detected_objects=detections, gemini_instance=command_gemini)
-                handle_command(command,ser=hand_ser)
-                speak(command.get("reply", "Done"))
+                speak(reply_text)
+                last_interaction = time.time()
+            
 
-                time.sleep(0.5)
+                arm_triggered = "[ARM_TRIGGER]" in convo_text
+
+                if arm_triggered:
+                    image,detections = capture_frame()
+
+                    if detections:
+                        labels = ", ".join([d['label'] for d in detections])
+                        print(f"I can see {labels}.")
+                        
+                    command = get_command(transcript, image_b64=image,detected_objects=detections, gemini_instance=command_gemini)
+                    handle_command(command,ser=hand_ser)
+                    speak(command.get("reply", "Done"))
+                    last_interaction = time.time()
 
     except KeyboardInterrupt:
         print("\nShutting down...")
